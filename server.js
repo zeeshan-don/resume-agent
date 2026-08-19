@@ -28,9 +28,12 @@ const upload = multer({
 
 // Helper: call OpenRouter API
 const MODELS = [
+  "nvidia/nemotron-3-ultra-550b-a55b:free",
   "google/gemma-4-31b-it:free",
   "nvidia/nemotron-3-super-120b-a12b:free",
   "openai/gpt-oss-20b:free",
+  "google/gemma-4-26b-a4b-it:free",
+  "dots-studio/dots-3-note-preview:free",
   "nvidia/nemotron-3.5-lightning:free",
 ];
 
@@ -97,38 +100,65 @@ async function callOpenRouter(messages, temperature = 0.4, maxTokens = 2000) {
 }
 
 // Helper: parse AI JSON response with retry on malformed output
-async function parseAIJson(response, retries = 1) {
+function parseAIJson(response) {
+  // Strip markdown fences
   let cleaned = response.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
-  let jsonMatch = cleaned.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) throw new Error("AI did not return valid JSON.");
 
+  // Remove any leading/trailing non-JSON text (e.g. "Here's the JSON:")
+  let firstBrace = cleaned.indexOf("{");
+  let lastBrace = cleaned.lastIndexOf("}");
+  if (firstBrace === -1 || lastBrace === -1 || lastBrace <= firstBrace) {
+    throw new Error("AI did not return valid JSON.");
+  }
+  let candidate = cleaned.substring(firstBrace, lastBrace + 1);
+
+  // Direct parse attempt
   try {
-    return JSON.parse(jsonMatch[0]);
+    return JSON.parse(candidate);
   } catch (e) {
-    // Try to fix common issues: trailing commas, extra text after JSON
-    let fixed = jsonMatch[0]
-      .replace(/,\s*([}\]])/g, '$1')          // trailing commas
-      .replace(/\n/g, ' ')                       // newlines inside strings
-      .replace(/\t/g, ' ');                      // tabs
+    // Try to fix common issues: trailing commas, unescaped newlines, etc.
+    let fixed = candidate
+      .replace(/,\s*([}\]])/g, "$1")          // trailing commas
+      .replace(/([^\\])\n/g, "$1 ")           // newlines (not escaped)
+      .replace(/\t/g, " ");                     // tabs
     try {
       return JSON.parse(fixed);
     } catch (e2) {
-      if (retries > 0) {
-        // Try to extract just up to the last closing brace at the right depth
-        let depth = 0, lastClose = -1;
-        for (let i = 0; i < jsonMatch[0].length; i++) {
-          if (jsonMatch[0][i] === '{') depth++;
-          if (jsonMatch[0][i] === '}') { depth--; lastClose = i; }
-          if (depth === 0 && lastClose > 0) break;
+      // Try to extract balanced JSON up to the last closing brace at depth 0
+      let depth = 0, lastClose = -1;
+      for (let i = 0; i < candidate.length; i++) {
+        if (candidate[i] === "{") depth++;
+        if (candidate[i] === "}") {
+          depth--;
+          if (depth === 0) lastClose = i;
         }
-        if (lastClose > 0) {
-          try {
-            return JSON.parse(jsonMatch[0].substring(0, lastClose + 1));
-          } catch (e3) { /* fall through */ }
-        }
+      }
+      if (lastClose > 0) {
+        try {
+          return JSON.parse(candidate.substring(0, lastClose + 1));
+        } catch (e3) { /* fall through */ }
       }
       throw e;
     }
+  }
+}
+
+// Helper: call OpenRouter and parse JSON with auto-retry
+async function callOpenRouterJson(messages, temperature = 0.4, maxTokens = 2000, retries = 1) {
+  let response = await callOpenRouter(messages, temperature, maxTokens);
+  try {
+    return parseAIJson(response);
+  } catch (parseErr) {
+    if (retries > 0) {
+      console.warn("JSON parse failed, retrying with correction prompt...");
+      const retryMessages = [
+        ...messages,
+        { role: "assistant", content: response },
+        { role: "user", content: "Your previous response was not valid JSON. Please return ONLY a valid JSON object with no extra text, no markdown fences, and no commentary. Just the raw JSON." },
+      ];
+      return callOpenRouterJson(retryMessages, temperature, maxTokens, retries - 1);
+    }
+    throw parseErr;
   }
 }
 
@@ -185,12 +215,9 @@ app.post("/api/analyze", upload.single("resume"), async (req, res) => {
 Student Profile/Resume Text:
 ${profileText}`;
 
-    const response = await callOpenRouter([
+    const profile = await callOpenRouterJson([
       { role: "user", content: prompt },
     ], 0.1, 1500);
-
-    // Extract JSON from response
-    const profile = await parseAIJson(response);
     res.json({ profile });
   } catch (err) {
     console.error("Analyze error:", err);
@@ -223,11 +250,9 @@ Return ONLY valid JSON (no markdown, no extra text) in this exact format:
 Student Profile:
 ${JSON.stringify(profile)}`;
 
-    const response = await callOpenRouter([
+    const careerFit = await callOpenRouterJson([
       { role: "user", content: prompt },
     ], 0.3, 2000);
-
-    const careerFit = await parseAIJson(response);
     res.json({ careerFit });
   } catch (err) {
     console.error("Career fit error:", err);
@@ -262,11 +287,9 @@ Return ONLY valid JSON in this format:
   "detailedAnalysis": "Detailed paragraph explaining the assessment"
 }`;
 
-    const response = await callOpenRouter([
+    const result = await callOpenRouterJson([
       { role: "user", content: prompt },
     ], 0.3, 1500);
-
-    const result = await parseAIJson(response);
     res.json({ result });
   } catch (err) {
     console.error("Role check error:", err);
@@ -301,11 +324,9 @@ Return ONLY valid JSON in this format:
   "detailedAnalysis": "Detailed paragraph comparing profile to JD"
 }`;
 
-    const response = await callOpenRouter([
+    const result = await callOpenRouterJson([
       { role: "user", content: prompt },
     ], 0.3, 2000);
-
-    const result = await parseAIJson(response);
     res.json({ result });
   } catch (err) {
     console.error("JD analyze error:", err);
@@ -362,11 +383,9 @@ Return ONLY valid JSON in this format:
   "generalTips": ["general resume tips based on this profile"]
 }`;
 
-    const response = await callOpenRouter([
+    const result = await callOpenRouterJson([
       { role: "user", content: prompt },
     ], 0.3, 2000);
-
-    const result = await parseAIJson(response);
     res.json({ result });
   } catch (err) {
     console.error("Improve resume error:", err);
