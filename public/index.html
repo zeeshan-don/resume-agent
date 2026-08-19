@@ -661,6 +661,17 @@
     function hideLoading(id) { document.getElementById(id).classList.remove("show"); }
     function showResults(id) { document.getElementById(id).classList.add("show"); }
 
+    function showApiError(err) {
+      const msg = err.message || "An error occurred.";
+      if (msg.includes("not configured") || msg.includes("authentication failed")) {
+        showToast("⚠️ AI service unavailable — " + msg, true);
+      } else if (msg.includes("unavailable")) {
+        showToast("⚠️ " + msg, true);
+      } else {
+        showToast(msg, true);
+      }
+    }
+
     // ─── HELPER: profile summary banner ───
     function renderProfileSummary(containerId) {
       if (!currentProfile) return;
@@ -702,7 +713,7 @@
         renderAnalyzeResults(data.profile);
         showToast("Profile analyzed successfully!");
       } catch (err) {
-        showToast(err.message || "Analysis failed.", true);
+        showApiError(err);
       } finally {
         hideLoading("loading-analyze");
       }
@@ -797,7 +808,7 @@
         renderCareerResults(data.careerFit);
         showToast("Career recommendations ready!");
       } catch (err) {
-        showToast(err.message || "Failed.", true);
+        showApiError(err);
       } finally {
         hideLoading("loading-career");
       }
@@ -851,7 +862,7 @@
         renderRoleResults(data.result);
         showToast("Role check complete!");
       } catch (err) {
-        showToast(err.message || "Failed.", true);
+        showApiError(err);
       } finally {
         hideLoading("loading-role");
       }
@@ -938,7 +949,7 @@
         renderJDResults(data.result);
         showToast("JD analysis complete!");
       } catch (err) {
-        showToast(err.message || "Failed.", true);
+        showApiError(err);
       } finally {
         hideLoading("loading-jd");
       }
@@ -1025,7 +1036,7 @@
         renderImproveResults(data.result);
         showToast("Improvement suggestions ready!");
       } catch (err) {
-        showToast(err.message || "Failed.", true);
+        showApiError(err);
       } finally {
         hideLoading("loading-improve");
       }

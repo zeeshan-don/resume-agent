@@ -27,34 +27,109 @@ const upload = multer({
 });
 
 // Helper: call OpenRouter API
+const MODELS = [
+  "google/gemma-4-31b-it:free",
+  "nvidia/nemotron-3-super-120b-a12b:free",
+  "openai/gpt-oss-20b:free",
+  "nvidia/nemotron-3.5-lightning:free",
+];
+
 async function callOpenRouter(messages, temperature = 0.4, maxTokens = 2000) {
   const apiKey = process.env.OPENROUTER_API_KEY;
-  if (!apiKey) throw new Error("OPENROUTER_API_KEY is not set.");
-
-  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-      "HTTP-Referer": "https://student-career-agent.vercel.app",
-      "X-Title": "Student Career Agent",
-    },
-    body: JSON.stringify({
-      model: "meta-llama/llama-3.3-70b-instruct:free",
-      messages,
-      temperature,
-      max_tokens: maxTokens,
-    }),
-  });
-
-  if (!res.ok) {
-    const err = await res.text();
-    console.error("OpenRouter error:", err);
-    throw new Error("AI request failed. Check your API key and try again.");
+  if (!apiKey) {
+    console.error("OPENROUTER_API_KEY is not configured.");
+    throw new Error("AI service is not configured. The server administrator needs to add an OpenRouter API key.");
   }
 
-  const data = await res.json();
-  return data.choices?.[0]?.message?.content || "";
+  let lastError = null;
+  for (const model of MODELS) {
+    try {
+      const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+          "HTTP-Referer": "https://student-career-agent.vercel.app",
+          "X-Title": "Student Career Agent",
+        },
+        body: JSON.stringify({
+          model,
+          messages,
+          temperature,
+          max_tokens: maxTokens,
+        }),
+      });
+
+      if (!res.ok) {
+        const errText = await res.text();
+        let errMsg = "AI request failed.";
+        try {
+          const errJson = JSON.parse(errText);
+          errMsg = errJson.error?.message || errJson.message || errText;
+        } catch {
+          errMsg = errText;
+        }
+        console.error(`OpenRouter error (model: ${model}):`, errMsg);
+        // If it's a 401/403, the key is invalid — stop immediately
+        if (res.status === 401 || res.status === 403) {
+          throw new Error("AI service authentication failed. The API key may be invalid or expired.");
+        }
+        lastError = new Error(`AI request failed: ${errMsg}`);
+        continue; // try next model
+      }
+
+      const data = await res.json();
+      const content = data.choices?.[0]?.message?.content || "";
+      if (content) return content;
+      lastError = new Error("AI returned an empty response.");
+      continue;
+    } catch (err) {
+      console.error(`Network error with model ${model}:`, err.message);
+      lastError = err;
+      continue;
+    }
+  }
+
+  if (lastError && lastError.message.includes("authentication failed")) {
+    throw lastError;
+  }
+  throw lastError || new Error("All AI models are currently unavailable. Please try again later.");
+}
+
+// Helper: parse AI JSON response with retry on malformed output
+async function parseAIJson(response, retries = 1) {
+  let cleaned = response.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
+  let jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) throw new Error("AI did not return valid JSON.");
+
+  try {
+    return JSON.parse(jsonMatch[0]);
+  } catch (e) {
+    // Try to fix common issues: trailing commas, extra text after JSON
+    let fixed = jsonMatch[0]
+      .replace(/,\s*([}\]])/g, '$1')          // trailing commas
+      .replace(/\n/g, ' ')                       // newlines inside strings
+      .replace(/\t/g, ' ');                      // tabs
+    try {
+      return JSON.parse(fixed);
+    } catch (e2) {
+      if (retries > 0) {
+        // Try to extract just up to the last closing brace at the right depth
+        let depth = 0, lastClose = -1;
+        for (let i = 0; i < jsonMatch[0].length; i++) {
+          if (jsonMatch[0][i] === '{') depth++;
+          if (jsonMatch[0][i] === '}') { depth--; lastClose = i; }
+          if (depth === 0 && lastClose > 0) break;
+        }
+        if (lastClose > 0) {
+          try {
+            return JSON.parse(jsonMatch[0].substring(0, lastClose + 1));
+          } catch (e3) { /* fall through */ }
+        }
+      }
+      throw e;
+    }
+  }
 }
 
 // Helper: parse uploaded file to text
@@ -115,11 +190,7 @@ ${profileText}`;
     ], 0.1, 1500);
 
     // Extract JSON from response
-    let cleaned = response.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
-    const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error("AI did not return valid JSON.");
-
-    const profile = JSON.parse(jsonMatch[0]);
+    const profile = await parseAIJson(response);
     res.json({ profile });
   } catch (err) {
     console.error("Analyze error:", err);
@@ -156,11 +227,7 @@ ${JSON.stringify(profile)}`;
       { role: "user", content: prompt },
     ], 0.3, 2000);
 
-    let cleaned = response.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
-    const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error("AI did not return valid JSON.");
-
-    const careerFit = JSON.parse(jsonMatch[0]);
+    const careerFit = await parseAIJson(response);
     res.json({ careerFit });
   } catch (err) {
     console.error("Career fit error:", err);
@@ -199,11 +266,7 @@ Return ONLY valid JSON in this format:
       { role: "user", content: prompt },
     ], 0.3, 1500);
 
-    let cleaned = response.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
-    const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error("AI did not return valid JSON.");
-
-    const result = JSON.parse(jsonMatch[0]);
+    const result = await parseAIJson(response);
     res.json({ result });
   } catch (err) {
     console.error("Role check error:", err);
@@ -242,11 +305,7 @@ Return ONLY valid JSON in this format:
       { role: "user", content: prompt },
     ], 0.3, 2000);
 
-    let cleaned = response.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
-    const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error("AI did not return valid JSON.");
-
-    const result = JSON.parse(jsonMatch[0]);
+    const result = await parseAIJson(response);
     res.json({ result });
   } catch (err) {
     console.error("JD analyze error:", err);
@@ -307,11 +366,7 @@ Return ONLY valid JSON in this format:
       { role: "user", content: prompt },
     ], 0.3, 2000);
 
-    let cleaned = response.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
-    const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error("AI did not return valid JSON.");
-
-    const result = JSON.parse(jsonMatch[0]);
+    const result = await parseAIJson(response);
     res.json({ result });
   } catch (err) {
     console.error("Improve resume error:", err);
